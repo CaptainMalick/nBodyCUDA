@@ -6,72 +6,83 @@
 #include <cuda_runtime.h>
 #include "device_launch_parameters.h"
 #include "utils.h"
+#include <chrono>
 #include <cuda.h>
 
 using namespace std;
 
 // Number of particles, set once by user.
-static unsigned long numParticles;
+// static unsigned long NUM_PARTICLES_MAX;
+static unsigned long NUM_PARTICLES;
 static particle* particleArr;
 static particle* d_particleArr;
 
-const int NUM_BLOCKS = 512;
-static int BLOCK_SIZE;
+static int NUM_BLOCKS;
+static int BLOCK_SIZE = 256;
+static float COPY_TIME = 0;
+static float KERNEL_TIME = 0;
 
-
+#define SHARED_PARTICLE_LIMIT 256
 
 // Creates initial conditions in terms of particle positions and velocities
 //In this case: Annulus .05 AU thick, .05 to 1.5 AU radius, perfecty orbits, randomly distributed
 void testCase() {
 	srand(time(nullptr));
 	size_t numAccept = 0;
-	while (numAccept < numParticles) {
-		double x = 3 * AU * (0.5 - doubleRand());
-		double y = 3 * AU * (0.5 - doubleRand());
-		double z = .05 * AU * (0.5 - doubleRand());
+	while (numAccept < NUM_PARTICLES) {
+		float x = 3 * AU * (0.5 - doubleRand());
+		float y = 3 * AU * (0.5 - doubleRand());
+		float z = .05 * AU * (0.5 - doubleRand());
 		if (pow(x, 2) + pow(y, 2) > pow(1.5 * AU, 2) || pow(x, 2) + pow(y, 2) < pow(.5 * AU, 2))
 			continue;
-		double posArr[3] = { x, y, z };
-		double r = pow(pow(x, 2) + pow(y, 2), .5);
-		double factor = pow(G * SM / r, .5);
-		double xvel = -y * factor / r;
-		double yvel = x * factor / r;
-		double velArr[3] = { xvel, yvel, 0 };
-		particleArr[numAccept] = particle(PM, posArr, velArr);
+		float posArr[3] = { x, y, z };
+		float r = sqrt(pow(x, 2) + pow(y, 2));
+		float factor = sqrt(GRAVITATIONAL_CONSTANT * SOLAR_MASS / r);
+		float vx = -y * factor / r;
+		float vy = x * factor / r;
+
+		particleArr[numAccept] = particle(PARTICLE_MASS, x, y, z, vx, vy, 0);
 		numAccept++;
 	}
 }
 
+void cleanupSimulation() {
+	cudaFreeHost(particleArr);
+	cudaFree(d_particleArr);
+}
 
 bool initSimulation() {
-	cout << "Enter number of particles to simulate" << endl;
+	std::cout << "Enter number of particles to simulate" << endl;
 	string numParticlesStr;
-	cin >> numParticlesStr;
-	numParticles = stod(numParticlesStr);
-	PM = TPM / numParticles; //Based on constants, calculated mass of particles
-	BLOCK_SIZE = (numParticles + NUM_BLOCKS - 1) / NUM_BLOCKS;
 
-	particleArr = (particle *) malloc(numParticles * sizeof(particle));
+	std::cin >> numParticlesStr;
+	
+	NUM_PARTICLES = stod(numParticlesStr);
+	NUM_PARTICLES = (NUM_PARTICLES + BLOCK_SIZE - 1) - (NUM_PARTICLES + BLOCK_SIZE - 1) % BLOCK_SIZE;
+	cout << "Particle count (rounded up): " << NUM_PARTICLES << endl;
+	PARTICLE_MASS = TOTAL_PARTICLE_MASS / NUM_PARTICLES;
+	NUM_BLOCKS = (NUM_PARTICLES + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+	cudaMallocHost(&particleArr, NUM_PARTICLES * sizeof(particle));
 	if (particleArr == NULL)
 	{
-		cout << "Heap allocation failed." << endl;
+		std::cout << "Heap allocation failed." << endl;
 		return false;
 	}
 
 	testCase();
-	if (cudaMalloc(&d_particleArr, numParticles * sizeof(particle)) != cudaSuccess)
+	if (cudaMalloc(&d_particleArr, NUM_PARTICLES * sizeof(particle)) != cudaSuccess)
 	{
-		free(particleArr);
-		cout << "GPU memory allocation failed." << endl;
+		cleanupSimulation();
+		std::cout << "GPU memory allocation failed." << endl;
 		return false;
 	}
 
-	if (cudaMemcpy(d_particleArr, particleArr, numParticles * sizeof(particle),
+	if (cudaMemcpy(d_particleArr, particleArr, NUM_PARTICLES * sizeof(particle),
 		cudaMemcpyHostToDevice) != cudaSuccess)
 	{
-		free(particleArr);
-		cudaFree(d_particleArr);
-		cout << "Memory copy failed." << endl;
+		cleanupSimulation();
+		std::cout << "Memory copy failed." << endl;
 		return false;
 	}
 
@@ -81,130 +92,180 @@ bool initSimulation() {
 
 
 __global__
-void d_kickDriftAll(particle* d_particleArr, unsigned long numParticles)
+void d_kickDriftAll(particle* d_particleArr, unsigned long NUM_PARTICLES)
 {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (id < numParticles)
+	if (id < NUM_PARTICLES)
 		d_particleArr[id].kickDrift();
 }
 
 __global__
-void d_kickAll(particle* d_particleArr, unsigned long numParticles)
+void d_kickAll(particle* d_particleArr, unsigned long NUM_PARTICLES)
 {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (id < numParticles)
+	if (id < NUM_PARTICLES)
 		d_particleArr[id].kick();
 }
 
+
 __global__
-void d_updateAccAll(particle* d_particleArr, unsigned long numParticles)
+void d_updateAccAll(particle* d_particleArr, unsigned long NUM_PARTICLES)
 {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (id < numParticles) 
+	__shared__ uint8_t sharedParticleBuf[SHARED_PARTICLE_LIMIT * sizeof(particle)];
+	particle* sharedParticleArr = (particle*)&sharedParticleBuf;
+
+
+	if (id < NUM_PARTICLES)
 	{
+		int written = 0;
 		particle* part = &d_particleArr[id];
-		// External field 
-		part->setAcc(-d_G * d_SM * part->getPos().getUnit() / part->getPos().magSq());
-		for (unsigned j = 0; j < numParticles; j++)
+		
+		// Must be doule precision to prevent overflow MAG_EXT_P6
+		double mag_ext_p6 = part->getPos().magSq();
+		mag_ext_p6 *= mag_ext_p6 * mag_ext_p6;
+		part->setAcc(-GRAVITATIONAL_CONSTANT * D_SOLAR_MASS * part->getPos() / sqrt(mag_ext_p6)); 
+
+		while (written < NUM_PARTICLES)
 		{
-			if (id != j)
+
+			int write = NUM_PARTICLES - written;
+			if (write > SHARED_PARTICLE_LIMIT)
+				write = SHARED_PARTICLE_LIMIT;
+			sharedParticleArr[threadIdx.x] = d_particleArr[written + threadIdx.x];
+	
+			__syncthreads();
+
+
+#pragma unroll (32)
+			for (unsigned j = 0; j < write; j++)
 			{
-				mvec rVec = part->getPos() - d_particleArr[j].getPos();
-				mvec rHat = rVec.getUnit();
-				double factor = -d_G / (rVec.magSq() + pow(SOFTENING, 2.));
-				part->setAcc(part->getAcc() + part->getMass() * factor * rHat);
+				const particle* partOther = &sharedParticleArr[j];
+				mvec rVec = part->getPos() - partOther->getPos();
+				float num = rVec.magSq() + SOFTENING * SOFTENING;
+				num *= num * num;
+				num = rsqrtf(num);
+
+				/* Storing mass up to negative G saves a multiplication and turns
+				   a subtraction into an addition, allowing for an FMA instruction to be used.
+				   Results in ~10% performance improvement. */
+				part->setAcc(part->getAcc() + num * partOther->getNegGMass() * rVec);
 			}
+			written += write;
 		}
 	}
 }
 
-__global__
-void d_doAll(particle* d_particleArr, unsigned long numParticles)
+
+void kickDriftAll(particle* d_particleArr, unsigned long NUM_PARTICLES)
 {
-	int id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (id < numParticles)
-	{
-		particle* part = &d_particleArr[id];
-		part->kickDrift();
-		// External field 
-		part->setAcc(-d_G * d_SM * part->getPos().getUnit() / part->getPos().magSq());
-		for (unsigned j = 0; j < numParticles; j++)
-		{
-			if (id != j)
-			{
-				mvec rVec = part->getPos() - d_particleArr[j].getPos();
-				mvec rHat = rVec.getUnit();
-				double factor = -d_G / (rVec.magSq() + pow(SOFTENING, 2.));
-				part->setAcc(part->getAcc() + part->getMass() * factor * rHat);
-			}
-		}
-		part->kick();
-	}
+	d_kickDriftAll<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_particleArr, NUM_PARTICLES);
 }
 
-void kickDriftAll(particle* d_particleArr, unsigned long numParticles)
+void kickAll(particle* d_particleArr, unsigned long NUM_PARTICLES)
 {
-	d_kickDriftAll<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_particleArr, numParticles);
+	d_kickAll<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_particleArr, NUM_PARTICLES);
 }
 
-void kickAll(particle* d_particleArr, unsigned long numParticles)
+
+void updateAccAll(particle* d_particleArr, unsigned long NUM_PARTICLES)
 {
-	d_kickAll<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_particleArr, numParticles);
+	d_updateAccAll << <NUM_BLOCKS, BLOCK_SIZE >> > (d_particleArr, NUM_PARTICLES);	
 }
 
-void updateAccAll(particle* d_particleArr, unsigned long numParticles)
+bool simulateStep()
 {
-	d_updateAccAll<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_particleArr, numParticles);
-}
+		auto t1 = chrono::high_resolution_clock::now();
+		kickDriftAll(d_particleArr, NUM_PARTICLES);
+		updateAccAll(d_particleArr, NUM_PARTICLES);
+		kickAll(d_particleArr, NUM_PARTICLES);
+		cudaDeviceSynchronize();
+		auto t2 = chrono::high_resolution_clock::now();
 
-double simulateStep() {
-	/*kickDriftAll(d_particleArr, numParticles);
-	updateAccAll(d_particleArr, numParticles);
-	kickAll(d_particleArr, numParticles);*/
-	d_doAll<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_particleArr, numParticles);
-	if (cudaMemcpy(particleArr, d_particleArr, numParticles * sizeof(particle),
-		cudaMemcpyDeviceToHost) != cudaSuccess)
-		cout << "Failed to copy memory to host" << endl;
-	return 0; 
+		KERNEL_TIME += chrono::duration<float>(t2 - t1).count();;
+
+		if (cudaMemcpy(particleArr, d_particleArr, NUM_PARTICLES * sizeof(particle),
+			cudaMemcpyDeviceToHost) != cudaSuccess)
+			std::cout << "Failed to copy memory to host" << endl;
+		auto t3 = chrono::high_resolution_clock::now();
+		COPY_TIME += chrono::duration<float>(t3 - t2).count();
+
+		return true;
 }
 
 
 int main() {
+	bool BENCHMARK = false;
 	if (!initSimulation()) {
-		cout << "Could not initialize simulation. Exiting..." << endl;
+		std::cout << "Could not initialize simulation. Exiting..." << endl;
 		return 0;
 	}
 
-
-	simulateStep();
+	std::cout << "PARTICLE SIZE: " << sizeof(particle) << endl;
+	sf::RenderWindow window(sf::VideoMode(2000, 2000), "nBodyCUDA");
 	int pixels_2 = 1000;
 	int scale = 3;
-	sf::RenderWindow window(sf::VideoMode(2000, 2000), "nBodyCUDA");
+	int j = 1;
+	auto t1 = chrono::high_resolution_clock::now();
+	simulateStep();
+	
 	while (window.isOpen())
 	{
-		sf::Event event;
-		while (window.pollEvent(event))
+		if (!BENCHMARK)
 		{
-			if (event.type == sf::Event::Closed)
-				window.close();
+			sf::Event event;
+			if (window.pollEvent(event))
+			{
+				if (event.type == sf::Event::Closed)
+					window.close();
+			}
+			window.clear(sf::Color(0, 0, 0));
+
+			for (unsigned i = 0; i < NUM_PARTICLES; i++) {
+				/*float mass = particleArr[i].getMass();
+				float wtf = mass / TOTAL_PARTICLE_MASS;
+				float rad = 20 * std::pow(wtf, .3333);
+				float xpos = particleArr[i].getPos().getX();
+				float ypos = particleArr[i].getPos().getY();
+				xpos = pixels_2 * ((xpos / scale) / AU) + pixels_2;
+				ypos = pixels_2 * ((ypos / scale) / AU) + pixels_2;*/
+				sf::CircleShape circ(6, 5);
+				circ.setPosition(0, 0);
+				circ.setFillColor(sf::Color(100, 250, 50));
+				window.draw(circ);
+			}
+			window.display();
 		}
-		window.clear(sf::Color(0, 0, 0));
-		for (unsigned i = 0; i < numParticles; i++) {
-			double mass = particleArr[i].getMass();
-			double wtf = mass / TPM;
-			float rad = 20 * std::pow(wtf, .3333);
-			double xpos = particleArr[i].getPos()[0];
-			double ypos = particleArr[i].getPos()[1];
-			xpos = pixels_2 * ((xpos / scale) / AU) + pixels_2;
-			ypos = pixels_2 * ((ypos / scale) / AU) + pixels_2;
-			sf::CircleShape circ(rad, 5);
-			circ.setPosition(xpos, ypos);
-			circ.setFillColor(sf::Color(100, 250, 50));
-			window.draw(circ);
-		}
-		window.display();
-		simulateStep();
+		if (!simulateStep())
+			break;
+		if (j++ % 100 == 0) std::cout << j << endl;
+		//if (j == 1000) break;
 	}
+	auto t2 = chrono::high_resolution_clock::now();
+	float duration = chrono::duration<float>(t2 - t1).count();
+
+	window.close();
+
+	std::cout << "Number of frames: " << j << endl;
+	std::cout << "Interactions per second (Billions): " << (j * NUM_PARTICLES * (float)NUM_PARTICLES / 1e9) / duration << endl << endl;
+
+	std::cout << "KERNEL TIME (sec): " << KERNEL_TIME << endl;
+	std::cout << "KERNEL PERCENT: " << 100 * KERNEL_TIME / duration << endl << endl;
+	std::cout << "COPY TIME (sec): " << COPY_TIME << endl;
+	std::cout << "COPY PERCENT: " << 100 * COPY_TIME / duration << endl << endl;
+	float unaccounted = duration - KERNEL_TIME - COPY_TIME;
+	std::cout << "UNACCOUNTED TIME (sec): " << unaccounted << endl;
+	std::cout << "UNACCOUNTED PERCENT: " << 100 * unaccounted / duration << endl << endl;
+	std::cout << "TOTAL TIME: (sec)" << duration << endl;
+
+	std::cout << endl << "FPS: " << j / duration << endl;
+
+	std::cout << "Press Enter to exit.." << endl;
+
+	string unused;
+	std::cin >> unused;
+
+	cleanupSimulation();
 
 	return 0;
 }
