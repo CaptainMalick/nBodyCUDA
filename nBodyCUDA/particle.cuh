@@ -1,90 +1,66 @@
 #pragma once
 #include "mvec.cuh"
 #include "constants.cuh"
+#include "particle-base.h"
+#include <cuda_runtime.h>
+#include "device_launch_parameters.h"
+#include "SFML/Graphics.hpp"
+#include <chrono>
 
-class particle
+template <typename T>
+struct posMass_s {
+    mvec<T> pos;
+    T negGMass;
+};
+
+
+static double COPY_TIME = 0;
+static double KERNEL_TIME = 0;
+
+template <typename T>
+class particle : public particleBase
 {
 public:
-    __host__ __device__
-    particle(float mass, float x, float y, float z, float vx, float vy, float vz) {
-        this->setMass(mass);
-        this->pos = mvec(x, y, z);
-        this->vel = mvec(vx, vy, vz);
-        this->tvel = mvec(0, 0, 0);
-        this->acc = mvec(0, 0, 0);
-    }
 
-    __host__ __device__
-    const mvec& getPos() const {
-        return pos;
-    }
+    particle(int numParticles, int numIterations);
+    
+    ~particle();
 
-    __host__ __device__
-    const mvec& getVel() const {
-        return vel;
-    }
+    bool init();
 
-    __host__ __device__
-    const mvec& getTVel() const {
-        return tvel;
-    }
+    bool integrate();
 
-    __host__ __device__
-    const mvec& getAcc() {
-        return acc;
-    }
+    bool display();
 
-    __host__ __device__
-    void setPos(const mvec& newPos) {
-        pos = newPos;
-    }
+    void cleanup();
 
-    __host__ __device__
-    void setVel(const mvec& newVel) {
-        vel = newVel;
-    }
-
-    __host__ __device__
-    void setTVel(const mvec& newTVel) {
-        tvel = newTVel;
-    }
-
-    __host__ __device__
-    void setAcc(const mvec& newAcc) {
-        acc = newAcc;
-    }
-
-    __host__ __device__
-    float getMass() const {
-        return -negGMass / GRAVITATIONAL_CONSTANT;
-    }
-
-    __host__ __device__
-    float getNegGMass() const {
-        return negGMass;
-    }
-
-    __host__ __device__
-    void setMass(float newMass) {
-        negGMass = -GRAVITATIONAL_CONSTANT * newMass;
-    }
-
-    __host__ __device__
-    void kickDrift() {
-        tvel = vel + dt * acc * (1. / 2);
-        pos += dt * tvel;
-        acc *= 0;
-    }
-
-    __host__ __device__
-    void kick() {
-        vel = tvel + dt * acc * (1. / 2);
-    }
+    void printStats();
 
 private:
-    float negGMass;
-    mvec pos;
-    mvec vel;
-    mvec tvel;
-    mvec acc;
+    std::chrono::steady_clock::time_point startTime;
+    std::chrono::steady_clock::time_point endTime;
+
+    bool displayBool;
+    
+    sf::RenderWindow window;
+
+    int counter;
+    int iterations;
+    struct posMass_s<T>* h_posMassArr;
+    struct posMass_s<T>* d_posMassArr;
+    mvec<T>* d_accArr;
+    mvec<T>* d_velArr;
+    
+
+    int numParticles;
+    int numBlocks;
+
+    void testCase();
+
+// Kernels in separate file
+    void d_kickDriftAll();
+
+    void d_kickAll();
+    
+    void d_updateAccAll();
 };

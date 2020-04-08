@@ -18,6 +18,12 @@
     <ClInclude Include="utils.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="particle_kernels.cuh">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="particle-base.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="utils.cpp">
@@ -31,17 +37,17 @@
     <CudaCompile Include="constants.cuh">
       <Filter>Header Files</Filter>
     </CudaCompile>
-    <CudaCompile Include="mvec.cu">
-      <Filter>Source Files</Filter>
-    </CudaCompile>
     <CudaCompile Include="mvec.cuh">
+      <Filter>Header Files</Filter>
+    </CudaCompile>
+    <CudaCompile Include="particle.cuh">
       <Filter>Header Files</Filter>
     </CudaCompile>
     <CudaCompile Include="particle.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
-    <CudaCompile Include="particle.cuh">
-      <Filter>Header Files</Filter>
+    <CudaCompile Include="particle_kernels.cu">
+      <Filter>Source Files</Filter>
     </CudaCompile>
   </ItemGroup>
 </Project>

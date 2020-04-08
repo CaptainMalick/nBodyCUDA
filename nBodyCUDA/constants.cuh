@@ -17,14 +17,11 @@ const static float AU = 1.5e11;
 
 /* Masses to a factor of neg_G to save on uncessary mul operations */
 // Solar mass 
-const static float SOLAR_MASS = 1.989e30; 
+const static float SOLAR_MASS = 1.989e30;
 __constant__ const static float D_SOLAR_MASS = 1.989e30;
 
 // Total particle mass.
 const static float TOTAL_PARTICLE_MASS = .001 * SOLAR_MASS;
-
-// Particle mass.
-static float PARTICLE_MASS;
 
 // Softening factor.
 __constant__ const static float SOFTENING = 1.5e9; //Used to remove singularities in force calculations

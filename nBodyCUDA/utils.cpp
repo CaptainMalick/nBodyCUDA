@@ -1,4 +1,4 @@
 #include <cmath>
-float doubleRand() {
-    return float(rand()) / (float(RAND_MAX));
+double doubleRand() {
+    return double(rand()) / (double(RAND_MAX));
 }

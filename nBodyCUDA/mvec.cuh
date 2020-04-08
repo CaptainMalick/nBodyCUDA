@@ -4,11 +4,12 @@
 #include <cuda_runtime.h>
 #include "device_launch_parameters.h"
 
+template <typename T>
 class mvec
 {
 public:
     __host__ __device__
-    mvec(float x, float y, float z) {
+    mvec(T x, T y, T z) {
         this->x = x;
         this->y = y;
         this->z = z;
@@ -22,35 +23,35 @@ public:
     }
 
     __host__ __device__
-     float getX() const {
+    T getX() const {
         return this->x;
     }
 
     __host__ __device__
-        float getY() const {
+    T getY() const {
         return this->y;
     }
 
     __host__ __device__
-        float getZ() const {
+    T getZ() const {
         return this->z;
     }
 
     __host__ __device__
-    float magSq() const {
+    T magSq() const {
         return this->x * this->x
             +  this->y * this->y 
             +  this->z * this->z;
     }
 
     __host__ __device__
-    float mag() const {
+    T mag() const {
         return sqrt(this->magSq());
     }
 
     __host__ __device__
     mvec getUnit() const {
-        float mag = this->mag();
+        double mag = this->mag();
         return *this / mag;
     }
 
@@ -62,7 +63,7 @@ public:
     }
 
     __host__ __device__
-    mvec& operator*=(float mult) {
+    mvec& operator*=(double mult) {
         this->x *= mult;
         this->y *= mult;
         this->z *= mult;
@@ -71,7 +72,7 @@ public:
     }
 
     __host__ __device__
-    mvec& operator/=(float divi) {
+    mvec& operator/=(double divi) {
         this->x *= (1.0f / divi);
         this->y *= (1.0f / divi);
         this->z *= (1.0f / divi);
@@ -102,19 +103,19 @@ public:
         return -1 * *this;
     }
 
-    __host__ __device__
-    friend mvec operator*(mvec v, float mult) {
+   __host__ __device__
+    friend mvec operator*(mvec v, double mult) {
         v *= mult;
         return v;
     }
 
     __host__ __device__
-    friend mvec operator*(float mult, mvec v) {
+    friend mvec operator*(double mult, mvec v) {
         v *= mult;
         return v;
     }
     __host__ __device__
-    friend mvec operator/(mvec v, float divi) {
+    friend mvec operator/(mvec v, double divi) {
         v /= divi;
         return v;
     }
@@ -140,5 +141,5 @@ public:
     }
 
 private:
-    float x, y, z;
+    T x, y, z;
 };
